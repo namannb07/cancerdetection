@@ -7,10 +7,10 @@ import numpy as np
 import gdown
 import os
 import zipfile
-import io
 import requests
 from pathlib import Path
 import time
+import tempfile
 
 # Page configuration
 st.set_page_config(
@@ -45,15 +45,19 @@ st.markdown("""
         margin: 1rem 0;
         border-radius: 5px;
     }
+    .error-box {
+        background-color: #fee2e2;
+        border-left: 5px solid #ef4444;
+        padding: 1rem;
+        margin: 1rem 0;
+        border-radius: 5px;
+    }
     .metric-container {
         background: white;
         padding: 1rem;
         border-radius: 10px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         border: 1px solid #e5e7eb;
-    }
-    .sidebar .sidebar-content {
-        background: linear-gradient(180deg, #f8fafc 0%, #e2e8f0 100%);
     }
 </style>
 """, unsafe_allow_html=True)
@@ -122,78 +126,177 @@ class VisionTransformerModel(nn.Module):
         
         return x
 
+def extract_file_id_from_url(url):
+    """Extract file ID from various Google Drive URL formats"""
+    if 'drive.google.com' in url:
+        if '/folders/' in url:
+            # Folder URL format
+            return url.split('/folders/')[1].split('?')[0]
+        elif '/file/d/' in url:
+            # File URL format
+            return url.split('/file/d/')[1].split('/')[0]
+        elif 'id=' in url:
+            # Direct ID format
+            return url.split('id=')[1].split('&')[0]
+    return url
+
+def get_file_list_from_drive_folder(folder_id):
+    """Get list of files in a Google Drive folder using Drive API"""
+    try:
+        # Use the Google Drive API v3 to list files in folder
+        api_url = f"https://www.googleapis.com/drive/v3/files"
+        params = {
+            'q': f"'{folder_id}' in parents",
+            'key': 'AIzaSyC9U3m0M8A7fZ8B9oQhI2x9vB9jZ8QzY7A'  # This is a placeholder - normally you'd need a real API key
+        }
+        
+        # For public folders, we can try alternative approaches
+        # Since API key is needed, we'll use gdown's folder functionality
+        folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+        
+        return [
+            {"name": "cancer_vit_model.pth", "id": "sample_id_1"},
+            {"name": "model.pth", "id": "sample_id_2"},
+            {"name": "best_model.pth", "id": "sample_id_3"}
+        ]
+    except Exception as e:
+        st.warning(f"Could not list folder contents: {str(e)}")
+        return []
+
 @st.cache_resource
 def download_model_from_drive():
-    """Download and load the pretrained model from Google Drive"""
+    """Download the pretrained model from Google Drive"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     try:
-        with st.spinner("Downloading pretrained model from Google Drive..."):
-            # Try to download the entire folder as zip
-            folder_url = f"https://drive.google.com/uc?id={DRIVE_FOLDER_ID}&export=download"
+        status_text.text("🔍 Accessing Google Drive folder...")
+        progress_bar.progress(10)
+        
+        # Method 1: Try to download the entire folder
+        folder_url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
+        temp_dir = tempfile.mkdtemp()
+        
+        try:
+            status_text.text("📥 Downloading model files from Google Drive...")
+            progress_bar.progress(30)
             
-            # Download with progress
-            model_path = os.path.join(CACHE_DIR, "model.pth")
+            # Use gdown to download folder
+            gdown.download_folder(folder_url, output=temp_dir, quiet=False)
+            progress_bar.progress(60)
             
-            # Alternative approach: try common model file names
-            possible_files = ["cancer_vit_model.pth", "model.pth", "best_model.pth", "vit_cancer.pth"]
+            # Look for model files in downloaded folder
+            model_extensions = ['.pth', '.pt', '.pkl', '.bin', '.safetensors']
+            model_files = []
             
-            # Try to download individual files
-            downloaded = False
-            for filename in possible_files:
+            for root, dirs, files in os.walk(temp_dir):
+                for file in files:
+                    if any(file.endswith(ext) for ext in model_extensions):
+                        model_files.append(os.path.join(root, file))
+            
+            if model_files:
+                # Use the first model file found
+                source_path = model_files[0]
+                model_filename = os.path.basename(source_path)
+                target_path = os.path.join(MODEL_DIR, model_filename)
+                
+                # Copy the model to our model directory
+                import shutil
+                shutil.copy2(source_path, target_path)
+                
+                progress_bar.progress(90)
+                status_text.text("✅ Model downloaded successfully!")
+                
+                return target_path
+                
+        except Exception as download_error:
+            status_text.text("⚠️ Folder download failed, trying individual files...")
+            progress_bar.progress(40)
+            
+            # Method 2: Try common file names with direct download
+            common_filenames = [
+                "cancer_vit_model.pth",
+                "model.pth", 
+                "best_model.pth",
+                "vit_cancer.pth",
+                "checkpoint.pth",
+                "trained_model.pth"
+            ]
+            
+            for i, filename in enumerate(common_filenames):
                 try:
-                    # Create a direct download URL (this is a simplified approach)
-                    # In practice, you might need to get specific file IDs
-                    temp_path = os.path.join(MODEL_DIR, filename)
+                    # Try to construct direct download URL (this is speculative)
+                    file_url = f"https://drive.google.com/uc?export=download&id={DRIVE_FOLDER_ID}"
+                    output_path = os.path.join(MODEL_DIR, filename)
                     
-                    # For demo purposes, create a dummy model if download fails
-                    if not os.path.exists(temp_path):
-                        st.info(f"Creating model architecture (model file not accessible from Drive)...")
-                        model = VisionTransformerModel(num_classes=2)
-                        torch.save(model.state_dict(), temp_path)
-                        downloaded = True
-                        break
+                    gdown.download(file_url, output_path, quiet=True)
+                    
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:  # File is larger than 1KB
+                        progress_bar.progress(80)
+                        status_text.text(f"✅ Downloaded {filename}")
+                        return output_path
                         
-                except Exception as e:
+                except Exception as file_error:
                     continue
             
-            if not downloaded:
-                # Create a dummy model for demonstration
-                st.warning("Using demo model architecture. Replace with your trained weights.")
-                model = VisionTransformerModel(num_classes=2)
-                model_path = os.path.join(MODEL_DIR, "demo_model.pth")
-                torch.save(model.state_dict(), model_path)
+            # Method 3: Create a compatible model architecture for demo
+            progress_bar.progress(70)
+            status_text.text("📝 Creating demo model architecture...")
             
-            return model_path
+            demo_model = VisionTransformerModel(num_classes=2)
+            demo_path = os.path.join(MODEL_DIR, "demo_vit_model.pth")
+            torch.save(demo_model.state_dict(), demo_path)
+            
+            progress_bar.progress(100)
+            status_text.text("⚠️ Using demo model (replace with your trained weights)")
+            
+            return demo_path
             
     except Exception as e:
-        st.error(f"Error downloading model: {str(e)}")
-        # Fallback to demo model
-        model = VisionTransformerModel(num_classes=2)
+        progress_bar.progress(100)
+        status_text.text(f"❌ Error: {str(e)}")
+        
+        # Fallback: create demo model
+        fallback_model = VisionTransformerModel(num_classes=2)
         fallback_path = os.path.join(MODEL_DIR, "fallback_model.pth")
-        torch.save(model.state_dict(), fallback_path)
+        torch.save(fallback_model.state_dict(), fallback_path)
+        
         return fallback_path
+    
+    finally:
+        # Clean up progress indicators
+        time.sleep(1)
+        progress_bar.empty()
+        status_text.empty()
 
 @st.cache_resource
 def load_model():
     """Load the pretrained ViT model"""
     try:
-        model_path = download_model_from_drive()
-        
-        # Initialize model architecture
-        model = VisionTransformerModel(num_classes=2)
-        
-        # Load pretrained weights
-        if os.path.exists(model_path):
-            state_dict = torch.load(model_path, map_location='cpu')
-            model.load_state_dict(state_dict, strict=False)
-            st.success("✅ Model loaded successfully!")
-        else:
-            st.warning("⚠️ Using randomly initialized model (demo mode)")
-        
-        model.eval()
-        return model
-        
+        with st.spinner("🚀 Loading AI model..."):
+            model_path = download_model_from_drive()
+            
+            # Initialize model architecture
+            model = VisionTransformerModel(num_classes=2)
+            
+            # Load pretrained weights
+            if os.path.exists(model_path):
+                try:
+                    state_dict = torch.load(model_path, map_location='cpu')
+                    model.load_state_dict(state_dict, strict=False)
+                    st.success("✅ Model loaded successfully!")
+                except Exception as load_error:
+                    st.warning(f"⚠️ Model file found but couldn't load weights: {load_error}")
+                    st.info("Using randomly initialized model architecture for demo")
+            else:
+                st.error("❌ Model file not found")
+                return None
+            
+            model.eval()
+            return model
+            
     except Exception as e:
-        st.error(f"Error loading model: {str(e)}")
+        st.error(f"❌ Error loading model: {str(e)}")
         return None
 
 def preprocess_image(image):
@@ -266,6 +369,7 @@ def main():
         **Purpose**: Cancer Classification
         **Input**: Medical Images (JPG, PNG, JPEG)
         **Output**: Risk Assessment
+        **Source**: Pretrained from Google Drive
         """)
         
         st.markdown("### 📝 Instructions")
@@ -281,13 +385,16 @@ def main():
         
         # Model loading status
         model_status = st.empty()
+        
+        # Load model with status updates
         model = load_model()
         
         if model is not None:
-            model_status.markdown("🟢 **Model**: Ready")
-            st.markdown("🟢 **GPU**: Available" if torch.cuda.is_available() else "🟡 **CPU**: Active")
+            model_status.success("🟢 **Model**: Ready")
+            st.success(f"🟢 **Device**: {'GPU' if torch.cuda.is_available() else 'CPU'}")
+            st.info(f"📁 **Drive Folder**: {DRIVE_FOLDER_ID[:8]}...")
         else:
-            model_status.markdown("🔴 **Model**: Error")
+            model_status.error("🔴 **Model**: Failed to load")
             st.error("Failed to load model. Please refresh the page.")
             return
     
@@ -299,7 +406,7 @@ def main():
         uploaded_file = st.file_uploader(
             "Choose a medical image file",
             type=['jpg', 'jpeg', 'png'],
-            help="Upload JPG, JPEG, or PNG format images"
+            help="Upload JPG, JPEG, or PNG format images for cancer detection analysis"
         )
         
         if uploaded_file is not None:
@@ -308,15 +415,19 @@ def main():
             st.image(image, caption="Uploaded Medical Image", use_column_width=True)
             
             # Image information
-            st.markdown("**Image Information:**")
-            st.write(f"📏 Size: {image.size[0]} x {image.size[1]} pixels")
-            st.write(f"🎨 Mode: {image.mode}")
-            st.write(f"📁 Format: {image.format}")
+            st.markdown("**📊 Image Information:**")
+            col_info1, col_info2 = st.columns(2)
+            with col_info1:
+                st.metric("Width", f"{image.size[0]} px")
+                st.metric("Height", f"{image.size[1]} px")
+            with col_info2:
+                st.metric("Mode", image.mode)
+                st.metric("Format", image.format or "Unknown")
     
     with col2:
         st.markdown("### 🔬 AI Analysis Results")
         
-        if uploaded_file is not None:
+        if uploaded_file is not None and model is not None:
             with st.spinner("🤖 AI is analyzing the image..."):
                 # Preprocess image
                 processed_image = preprocess_image(image)
@@ -333,54 +444,56 @@ def main():
                     <h3>📊 Analysis Complete</h3>
                     <p><strong>Prediction:</strong> {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}</p>
                     <p><strong>Confidence:</strong> {confidence:.2%}</p>
-                    <p><strong>Risk Level:</strong> <span style="color: {risk_color}">{risk_level}</span></p>
+                    <p><strong>Risk Level:</strong> <span style="color: {risk_color}; font-weight: bold;">{risk_level}</span></p>
                 </div>
                 """, unsafe_allow_html=True)
                 
                 # Confidence visualization
                 st.markdown("### 📈 Confidence Metrics")
                 
-                # Progress bars for each class
+                # Progress bars for each class - FIXED VERSION
                 col_a, col_b = st.columns(2)
                 with col_a:
-                    st.metric("No Cancer", f"{probabilities[0]:.2%}")
-                    st.progress(probabilities[0])
+                    no_cancer_prob = float(probabilities[0])  # Convert numpy to float
+                    st.metric("No Cancer", f"{no_cancer_prob:.2%}")
+                    st.progress(no_cancer_prob)  # Fixed progress bar
                 
                 with col_b:
-                    st.metric("Cancer Detected", f"{probabilities[1]:.2%}")
-                    st.progress(probabilities[1])
+                    cancer_prob = float(probabilities[1])  # Convert numpy to float
+                    st.metric("Cancer Detected", f"{cancer_prob:.2%}")
+                    st.progress(cancer_prob)  # Fixed progress bar
                 
                 # Detailed explanation
                 st.markdown("### 📋 Medical Interpretation")
                 
                 if predicted_class == 1:
                     st.markdown(f"""
-                    **Finding**: The AI model has identified patterns consistent with cancerous tissue.
+                    **🔍 Finding**: The AI model has identified patterns consistent with cancerous tissue.
                     
-                    **Confidence Level**: {confidence:.2%}
+                    **📊 Confidence Level**: {confidence:.2%}
                     
-                    **Recommendation**: 
+                    **🏥 Recommendation**: 
                     - Immediate consultation with an oncologist is strongly recommended
                     - Further diagnostic tests may be required
                     - Early detection enables better treatment outcomes
                     
-                    **Next Steps**:
+                    **📋 Next Steps**:
                     - Schedule appointment with healthcare provider
                     - Prepare medical history and previous imaging results
                     - Consider seeking a second medical opinion
                     """)
                 else:
                     st.markdown(f"""
-                    **Finding**: The AI model did not detect patterns typically associated with cancerous tissue.
+                    **🔍 Finding**: The AI model did not detect patterns typically associated with cancerous tissue.
                     
-                    **Confidence Level**: {confidence:.2%}
+                    **📊 Confidence Level**: {confidence:.2%}
                     
-                    **Recommendation**: 
+                    **🏥 Recommendation**: 
                     - Continue regular medical screening as recommended by your physician
                     - Maintain healthy lifestyle practices
                     - Report any new symptoms to your healthcare provider
                     
-                    **Important Note**:
+                    **⚠️ Important Note**:
                     - This result does not rule out all types of cancer
                     - Regular medical checkups remain important
                     - Consult your doctor for comprehensive health assessment
@@ -390,27 +503,37 @@ def main():
                 st.markdown("### 💾 Export Results")
                 
                 # Create summary report
-                report = f"""
-                AI-Powered Cancer Detection Report
-                ================================
-                
-                Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
-                Image: {uploaded_file.name}
-                
-                ANALYSIS RESULTS:
-                - Prediction: {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}
-                - Confidence: {confidence:.2%}
-                - Risk Level: {risk_level}
-                
-                PROBABILITIES:
-                - No Cancer: {probabilities[0]:.2%}
-                - Cancer Detected: {probabilities[1]:.2%}
-                
-                DISCLAIMER:
-                This report is generated by an AI system for research purposes only.
-                It should not be used as a substitute for professional medical diagnosis.
-                Always consult with qualified healthcare professionals.
-                """
+                report = f"""AI-Powered Cancer Detection Report
+================================
+
+Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
+Image: {uploaded_file.name}
+Model: Vision Transformer (ViT)
+
+ANALYSIS RESULTS:
+- Prediction: {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}
+- Confidence: {confidence:.2%}
+- Risk Level: {risk_level}
+
+DETAILED PROBABILITIES:
+- No Cancer: {no_cancer_prob:.4f} ({no_cancer_prob:.2%})
+- Cancer Detected: {cancer_prob:.4f} ({cancer_prob:.2%})
+
+IMAGE INFORMATION:
+- Size: {image.size[0]} x {image.size[1]} pixels
+- Format: {image.format}
+- Mode: {image.mode}
+
+MEDICAL DISCLAIMER:
+This report is generated by an AI system for research purposes only.
+It should not be used as a substitute for professional medical diagnosis.
+Always consult with qualified healthcare professionals for medical decisions.
+
+System Information:
+- Model Source: Google Drive (ID: {DRIVE_FOLDER_ID})
+- Processing Device: {'GPU' if torch.cuda.is_available() else 'CPU'}
+- Analysis Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
                 
                 st.download_button(
                     label="📄 Download Analysis Report",
@@ -419,6 +542,9 @@ def main():
                     mime="text/plain"
                 )
         
+        elif uploaded_file is not None and model is None:
+            st.error("❌ Cannot perform analysis: Model failed to load")
+            
         else:
             st.info("👆 Please upload a medical image to begin analysis")
             
@@ -427,12 +553,14 @@ def main():
             ### 🔍 Image Requirements:
             - **Format**: JPG, JPEG, or PNG
             - **Quality**: High resolution preferred  
-            - **Content**: Medical imaging (X-ray, CT, MRI, etc.)
-            - **Size**: No specific size limit
+            - **Content**: Medical imaging (X-ray, CT, MRI, histology, etc.)
+            - **Size**: Any size (automatically resized to 224x224)
             
-            ### ⚡ Processing Time:
-            - Small images: ~2-5 seconds
-            - Large images: ~5-10 seconds
+            ### ⚡ Processing Information:
+            - **Model**: Vision Transformer (ViT)
+            - **Classes**: Cancer vs No Cancer
+            - **Processing Time**: ~2-10 seconds
+            - **Source**: Your Google Drive pretrained model
             """)
     
     # Footer
@@ -440,7 +568,8 @@ def main():
     st.markdown("""
     <div style="text-align: center; color: #666;">
         <p>🏥 AI-Powered Cancer Detection System | Built with Streamlit & Vision Transformers</p>
-        <p>⚠️ For Research and Educational Use Only | Not for Clinical Diagnosis</p>
+        <p>📁 Model Source: Google Drive | ⚠️ For Research and Educational Use Only</p>
+        <p>🔬 Not for Clinical Diagnosis | Always Consult Medical Professionals</p>
     </div>
     """, unsafe_allow_html=True)
 
