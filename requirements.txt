@@ -5,4 +5,3 @@ Pillow
 numpy
 gdown>=5.0.0
 requests
-transformers
