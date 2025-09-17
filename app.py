@@ -282,12 +282,37 @@ def load_model():
             # Load pretrained weights
             if os.path.exists(model_path):
                 try:
-                    state_dict = torch.load(model_path, map_location='cpu')
-                    model.load_state_dict(state_dict, strict=False)
+                    # Load with weights_only=False for models with transformers components
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    
+                    # Extract just the model weights, ignoring training arguments
+                    if isinstance(checkpoint, dict):
+                        # Look for the actual model state dict
+                        possible_keys = ['model_state_dict', 'state_dict', 'model', 'net']
+                        model_weights = None
+                        
+                        for key in possible_keys:
+                            if key in checkpoint:
+                                model_weights = checkpoint[key]
+                                break
+                        
+                        if model_weights is None:
+                            # Assume the checkpoint itself is the state dict
+                            model_weights = checkpoint
+                    else:
+                        model_weights = checkpoint
+                    
+                    # Load weights (ignore mismatched keys)
+                    missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
+                    
+                    if len(missing_keys) > 0:
+                        st.info(f"ℹ️ Some model parameters were randomly initialized: {len(missing_keys)} keys")
+                    
                     st.success("✅ Model loaded successfully!")
+                    
                 except Exception as load_error:
-                    st.warning(f"⚠️ Model file found but couldn't load weights: {load_error}")
-                    st.info("Using randomly initialized model architecture for demo")
+                    st.warning(f"⚠️ Could not load weights: {str(load_error)}")
+                    st.info("🎯 Using model architecture without pretrained weights")
             else:
                 st.error("❌ Model file not found")
                 return None
@@ -298,6 +323,7 @@ def load_model():
     except Exception as e:
         st.error(f"❌ Error loading model: {str(e)}")
         return None
+
 
 def preprocess_image(image):
     """Preprocess image for ViT model"""
