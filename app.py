@@ -282,115 +282,84 @@ def load_model():
             # Load pretrained weights
             if os.path.exists(model_path):
                 try:
-                    # Load checkpoint without external dependencies
-                    import pickle
-                    import warnings
+                    # Now we can use the full power of transformers/accelerate libraries
+                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
+                    st.info("📦 Checkpoint loaded successfully with all libraries available")
                     
-                    # Suppress warnings about missing modules
-                    warnings.filterwarnings("ignore")
-                    
-                    # Try loading with different methods
-                    checkpoint = None
-                    
-                    # Method 1: Basic torch.load
-                    try:
-                        checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-                        st.info("📦 Loaded checkpoint with torch.load")
-                    except Exception as e1:
-                        st.warning(f"Method 1 failed: {str(e1)[:50]}...")
+                    # Handle different checkpoint formats from Hugging Face/transformers
+                    if isinstance(checkpoint, dict):
+                        # Common keys in Hugging Face and PyTorch checkpoints
+                        possible_keys = [
+                            'model_state_dict', 'state_dict', 'model', 'net',
+                            'pytorch_model.bin', 'model_weights', 'parameters'
+                        ]
                         
-                        # Method 2: Load as raw pickle and extract tensors
-                        try:
-                            with open(model_path, 'rb') as f:
-                                raw_data = pickle.load(f)
+                        model_weights = None
+                        for key in possible_keys:
+                            if key in checkpoint:
+                                model_weights = checkpoint[key]
+                                st.info(f"📋 Found model weights under key: '{key}'")
+                                break
+                        
+                        # If no specific key found, filter the checkpoint for model parameters
+                        if model_weights is None:
+                            model_weights = {}
+                            for key, value in checkpoint.items():
+                                # Skip training-related items but keep model parameters
+                                if isinstance(value, torch.Tensor) and not any(
+                                    skip in key.lower() for skip in [
+                                        'optimizer', 'scheduler', 'scaler', 'epoch', 
+                                        'step', 'loss', 'metric', 'lr', 'training_args',
+                                        'rng_state', 'amp', 'dataloader'
+                                    ]
+                                ):
+                                    model_weights[key] = value
                             
-                            # Extract only tensor data
-                            tensor_dict = {}
-                            if isinstance(raw_data, dict):
-                                for key, value in raw_data.items():
-                                    if isinstance(value, torch.Tensor):
-                                        tensor_dict[key] = value
-                                    elif isinstance(value, dict):
-                                        # Nested dict - look for tensors
-                                        for sub_key, sub_value in value.items():
-                                            if isinstance(sub_value, torch.Tensor):
-                                                tensor_dict[f"{key}.{sub_key}"] = sub_value
-                            
-                            if tensor_dict:
-                                checkpoint = tensor_dict
-                                st.info("📦 Extracted tensors from checkpoint")
+                            if model_weights:
+                                st.info(f"📋 Extracted {len(model_weights)} model parameters from checkpoint")
                             else:
-                                raise Exception("No tensors found in checkpoint")
-                                
-                        except Exception as e2:
-                            st.warning(f"Method 2 failed: {str(e2)[:50]}...")
-                            
-                            # Method 3: Create a working demo model
-                            st.info("🎯 Creating demo model with random weights")
-                            model.eval()
-                            return model
+                                # Try to use the whole checkpoint as state dict
+                                model_weights = checkpoint
+                                st.info("📋 Using entire checkpoint as model state dict")
+                    else:
+                        model_weights = checkpoint
+                        st.info("📋 Using direct checkpoint as model weights")
                     
-                    # If we have a checkpoint, try to load it
-                    if checkpoint is not None:
-                        # Handle different checkpoint structures
-                        model_state_dict = None
+                    # Load the weights into our model
+                    if model_weights:
+                        missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
                         
-                        if isinstance(checkpoint, dict):
-                            # Look for model weights in common locations
-                            possible_keys = [
-                                'model_state_dict', 'state_dict', 'model', 'net', 
-                                'pytorch_model.bin', 'model_weights', 'parameters'
-                            ]
-                            
-                            for key in possible_keys:
-                                if key in checkpoint:
-                                    model_state_dict = checkpoint[key]
-                                    st.info(f"📋 Found weights under: {key}")
-                                    break
-                            
-                            # If no specific key, assume the dict IS the state dict
-                            if model_state_dict is None:
-                                # Filter to keep only tensor values that look like model parameters
-                                filtered_dict = {}
-                                for k, v in checkpoint.items():
-                                    if isinstance(v, torch.Tensor) and len(v.shape) > 0:
-                                        # Keep parameters that match our model structure
-                                        if any(layer_name in k for layer_name in 
-                                              ['patch_embed', 'cls_token', 'pos_embed', 'transformer', 'norm', 'head']):
-                                            filtered_dict[k] = v
-                                
-                                if filtered_dict:
-                                    model_state_dict = filtered_dict
-                                    st.info(f"📋 Filtered {len(filtered_dict)} matching parameters")
-                        else:
-                            model_state_dict = checkpoint
+                        # Report loading status
+                        total_params = len(list(model.named_parameters()))
+                        loaded_params = total_params - len(missing_keys)
                         
-                        # Load the state dict
-                        if model_state_dict:
-                            missing_keys, unexpected_keys = model.load_state_dict(
-                                model_state_dict, strict=False
-                            )
-                            
-                            loaded_params = len(model_state_dict) - len(unexpected_keys)
-                            total_params = len(list(model.parameters()))
-                            
-                            st.success(f"✅ Loaded {loaded_params}/{total_params} parameters!")
-                            
-                            if missing_keys:
-                                st.info(f"ℹ️ {len(missing_keys)} parameters use random initialization")
-                            if unexpected_keys:
-                                st.info(f"ℹ️ {len(unexpected_keys)} extra parameters ignored")
-                        else:
-                            st.warning("⚠️ Could not extract model weights from checkpoint")
-                    
+                        st.success(f"✅ Model loaded successfully!")
+                        st.info(f"📊 Parameters: {loaded_params}/{total_params} loaded from checkpoint")
+                        
+                        if missing_keys:
+                            st.info(f"🔄 {len(missing_keys)} parameters randomly initialized")
+                        if unexpected_keys:
+                            st.info(f"⚠️ {len(unexpected_keys)} extra parameters ignored from checkpoint")
+                    else:
+                        st.warning("⚠️ No valid model weights found in checkpoint")
+                        st.info("🎯 Using randomly initialized model for demo")
+                        
                 except Exception as load_error:
-                    st.warning(f"⚠️ Weight loading failed: {str(load_error)}")
-                    st.info("🎯 Using model architecture with random weights (demo mode)")
+                    st.error(f"❌ Failed to load weights: {str(load_error)}")
+                    st.info("🎯 Using model architecture with random initialization")
             else:
                 st.warning("⚠️ Model file not found - using random weights")
             
             model.eval()
             return model
+            
+    except Exception as e:
+        st.error(f"❌ Error loading model: {str(e)}")
+        # Fallback: always return a working model
+        model = VisionTransformerModel(num_classes=2)
+        model.eval()
+        return model
+
             
     except Exception as e:
         st.error(f"❌ Error loading model: {str(e)}")
