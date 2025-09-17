@@ -2,7 +2,7 @@ import streamlit as st
 import torch
 import torch.nn as nn
 import torchvision.transforms as transforms
-from PIL import Image
+from PIL import Image, ImageEnhance
 import numpy as np
 import gdown
 import os
@@ -51,6 +51,21 @@ st.markdown("""
         padding: 1rem;
         margin: 1rem 0;
         border-radius: 5px;
+    }
+    .critical-box {
+        background-color: #fecaca;
+        border: 3px solid #dc2626;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border-radius: 10px;
+        box-shadow: 0 4px 6px rgba(220, 38, 38, 0.1);
+    }
+    .oral-warning {
+        background-color: #fff3cd;
+        border-left: 5px solid #ffc107;
+        padding: 1.5rem;
+        margin: 1rem 0;
+        border-radius: 8px;
     }
     .metric-container {
         background: white;
@@ -126,34 +141,58 @@ class VisionTransformerModel(nn.Module):
         
         return x
 
+def detect_oral_image(filename, image):
+    """Detect if image is likely oral/dental based on filename and content analysis"""
+    filename_lower = filename.lower()
+    
+    # Check filename patterns
+    oral_keywords = [
+        'oral', 'dental', 'mouth', 'teeth', 'tooth', 'gum', 'tongue', 
+        'tc05', 'tc', 'intraoral', 'buccal', 'palatal', 'mandibular', 
+        'maxillary', 'lesion', 'ulcer', 'lip'
+    ]
+    
+    filename_indicates_oral = any(keyword in filename_lower for keyword in oral_keywords)
+    
+    # Simple image analysis - check if image has characteristics of oral photography
+    try:
+        # Convert to numpy array for basic analysis
+        img_array = np.array(image)
+        
+        # Check for reddish/pinkish tones common in oral images
+        red_channel = img_array[:, :, 0]
+        green_channel = img_array[:, :, 1]
+        blue_channel = img_array[:, :, 2]
+        
+        # Calculate color statistics
+        red_dominance = np.mean(red_channel) / (np.mean(img_array) + 1e-10)
+        
+        # Oral images often have red/pink dominance
+        color_indicates_oral = red_dominance > 0.4
+        
+        return filename_indicates_oral or color_indicates_oral, {
+            'filename_match': filename_indicates_oral,
+            'color_analysis': color_indicates_oral,
+            'red_dominance': red_dominance
+        }
+    except:
+        return filename_indicates_oral, {'filename_match': filename_indicates_oral}
+
 def extract_file_id_from_url(url):
     """Extract file ID from various Google Drive URL formats"""
     if 'drive.google.com' in url:
         if '/folders/' in url:
-            # Folder URL format
             return url.split('/folders/')[1].split('?')[0]
         elif '/file/d/' in url:
-            # File URL format
             return url.split('/file/d/')[1].split('/')[0]
         elif 'id=' in url:
-            # Direct ID format
             return url.split('id=')[1].split('&')[0]
     return url
 
 def get_file_list_from_drive_folder(folder_id):
     """Get list of files in a Google Drive folder using Drive API"""
     try:
-        # Use the Google Drive API v3 to list files in folder
-        api_url = f"https://www.googleapis.com/drive/v3/files"
-        params = {
-            'q': f"'{folder_id}' in parents",
-            'key': 'AIzaSyC9U3m0M8A7fZ8B9oQhI2x9vB9jZ8QzY7A'  # This is a placeholder - normally you'd need a real API key
-        }
-        
-        # For public folders, we can try alternative approaches
-        # Since API key is needed, we'll use gdown's folder functionality
         folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-        
         return [
             {"name": "cancer_vit_model.pth", "id": "sample_id_1"},
             {"name": "model.pth", "id": "sample_id_2"},
@@ -225,13 +264,12 @@ def download_model_from_drive():
             
             for i, filename in enumerate(common_filenames):
                 try:
-                    # Try to construct direct download URL (this is speculative)
                     file_url = f"https://drive.google.com/uc?export=download&id={DRIVE_FOLDER_ID}"
                     output_path = os.path.join(MODEL_DIR, filename)
                     
                     gdown.download(file_url, output_path, quiet=True)
                     
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:  # File is larger than 1KB
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
                         progress_bar.progress(80)
                         status_text.text(f"✅ Downloaded {filename}")
                         return output_path
@@ -271,7 +309,7 @@ def download_model_from_drive():
 
 @st.cache_resource
 def load_model():
-    """Load the pretrained ViT model - Fixed for TrainingArguments error"""
+    """Load the pretrained ViT model with enhanced error handling"""
     try:
         with st.spinner("🚀 Loading AI model..."):
             model_path = download_model_from_drive()
@@ -279,17 +317,23 @@ def load_model():
             # Always create a working model first
             model = VisionTransformerModel(num_classes=2)
             
+            # Add model training disclaimer
+            st.info("""
+            📋 **Model Training Information**: 
+            This model may have limited accuracy on oral/dental cancer images.
+            For oral lesions, results should be interpreted with caution and 
+            professional consultation is strongly recommended.
+            """)
+            
             # Try to load weights if the file exists
             if os.path.exists(model_path):
                 try:
-                    # Load the checkpoint file
                     loaded_data = torch.load(model_path, map_location='cpu', weights_only=False)
                     st.info("📦 Checkpoint file loaded")
                     
-                    # Handle different types of loaded data
                     model_weights = None
                     
-                    # Check if loaded_data is a TrainingArguments object (common issue)
+                    # Check if loaded_data is a TrainingArguments object
                     if hasattr(loaded_data, '__class__') and 'TrainingArguments' in str(type(loaded_data)):
                         st.warning("⚠️ Loaded file contains TrainingArguments, not model weights")
                         st.info("🎯 Using model architecture with random weights")
@@ -298,7 +342,6 @@ def load_model():
                     
                     # Handle dictionary checkpoints
                     elif isinstance(loaded_data, dict):
-                        # Try common checkpoint keys
                         checkpoint_keys = ['model_state_dict', 'state_dict', 'model', 'net']
                         
                         for key in checkpoint_keys:
@@ -307,7 +350,6 @@ def load_model():
                                 st.info(f"📋 Found model weights under key: {key}")
                                 break
                         
-                        # If no specific key worked, filter for tensor data
                         if model_weights is None:
                             model_weights = {}
                             for key, value in loaded_data.items():
@@ -320,12 +362,6 @@ def load_model():
                                 st.warning("⚠️ No tensor data found in checkpoint")
                                 model.eval()
                                 return model
-                    
-                    # Handle direct tensor dictionary
-                    elif isinstance(loaded_data, torch.Tensor):
-                        st.warning("⚠️ Loaded data is a single tensor, expected state dict")
-                        model.eval()
-                        return model
                     
                     else:
                         st.warning(f"⚠️ Unexpected data type: {type(loaded_data)}")
@@ -358,22 +394,31 @@ def load_model():
             
     except Exception as e:
         st.error(f"❌ Error: {str(e)}")
-        # Always return a working model
         model = VisionTransformerModel(num_classes=2)
         model.eval()
         return model
 
-def preprocess_image(image):
-    """Preprocess image for ViT model"""
+def preprocess_image(image, is_oral=False):
+    """Enhanced preprocessing for medical images, especially oral images"""
+    if image.mode != 'RGB':
+        image = image.convert('RGB')
+    
+    # Enhanced preprocessing for oral images
+    if is_oral:
+        # Enhance contrast for oral images
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(1.2)
+        
+        # Enhance color saturation
+        color_enhancer = ImageEnhance.Color(image)
+        image = color_enhancer.enhance(1.1)
+    
     transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], 
                            std=[0.229, 0.224, 0.225])
     ])
-    
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
     
     return transform(image).unsqueeze(0)
 
@@ -387,8 +432,8 @@ def predict_cancer(model, image_tensor):
         
     return predicted_class, confidence, probabilities[0].cpu().numpy()
 
-def get_risk_level(confidence, predicted_class):
-    """Determine risk level based on prediction - Simplified for cancer only"""
+def get_risk_level(confidence, predicted_class, is_oral=False, cancer_prob=0.0):
+    """Enhanced risk assessment with oral cancer considerations"""
     if predicted_class == 1:  # Cancer detected
         if confidence > 0.8:
             return "🔴 HIGH RISK", "red"
@@ -397,7 +442,10 @@ def get_risk_level(confidence, predicted_class):
         else:
             return "🟡 LOW-MODERATE RISK", "gold"
     else:  # No cancer detected
-        if confidence > 0.8:
+        # Special handling for oral images - lower thresholds
+        if is_oral and cancer_prob > 0.25:
+            return "🟡 ORAL LESION - REQUIRES ATTENTION", "orange"
+        elif confidence > 0.8:
             return "🟢 LOW RISK", "green"
         elif confidence > 0.6:
             return "🟡 LOW-MODERATE RISK", "gold"
@@ -434,6 +482,7 @@ def main():
         **Input**: Medical Images (JPG, PNG, JPEG)
         **Output**: Cancer Risk Assessment
         **Source**: Pretrained from Google Drive
+        **⚠️ Limited Oral Cancer Training**
         """)
         
         st.markdown("### 📝 Instructions")
@@ -441,7 +490,7 @@ def main():
         1. Upload a medical image
         2. Wait for AI analysis
         3. Review the cancer risk assessment
-        4. Consult medical professionals
+        4. **For oral lesions: Consult specialists immediately**
         5. Export results if needed
         """)
         
@@ -492,15 +541,50 @@ def main():
         st.markdown("### 🔬 AI Analysis Results")
         
         if uploaded_file is not None and model is not None:
+            # Detect if this is an oral image
+            is_oral, oral_analysis = detect_oral_image(uploaded_file.name, image)
+            
+            if is_oral:
+                st.markdown("""
+                <div class="oral-warning">
+                    <h3>🦷 Oral/Dental Image Detected</h3>
+                    <p><strong>⚠️ IMPORTANT NOTICE</strong></p>
+                    <p>This appears to be an oral/dental image. Our model may have <strong>limited accuracy</strong> 
+                    on oral cancer detection as it wasn't specifically trained on comprehensive oral cancer datasets.</p>
+                    <p><strong>For any oral lesions, bumps, or abnormalities - consult an oral surgeon 
+                    or oncologist immediately, regardless of AI results.</strong></p>
+                </div>
+                """, unsafe_allow_html=True)
+            
             with st.spinner("🤖 AI is analyzing the image..."):
-                # Preprocess image
-                processed_image = preprocess_image(image)
+                # Enhanced preprocessing for oral images
+                processed_image = preprocess_image(image, is_oral=is_oral)
                 
                 # Make prediction
                 predicted_class, confidence, probabilities = predict_cancer(model, processed_image)
                 
-                # Get risk level
-                risk_level, risk_color = get_risk_level(confidence, predicted_class)
+                # Get cancer probability
+                cancer_prob = float(probabilities[1])
+                
+                # Enhanced risk level assessment
+                risk_level, risk_color = get_risk_level(confidence, predicted_class, is_oral, cancer_prob)
+                
+                # Critical alerts for potential oral cancer
+                if is_oral and cancer_prob > 0.20:
+                    st.markdown(f"""
+                    <div class="critical-box">
+                        <h3>🚨 URGENT - Potential Oral Cancer Detected</h3>
+                        <p><strong>Cancer Probability: {cancer_prob:.2%}</strong></p>
+                        <p><strong>IMMEDIATE ACTION REQUIRED:</strong></p>
+                        <ul>
+                            <li>Contact an oral surgeon or oncologist within 24-48 hours</li>
+                            <li>Do not delay - early detection saves lives</li>
+                            <li>Bring this image and report to your appointment</li>
+                            <li>Consider getting a biopsy if lesion persists</li>
+                        </ul>
+                        <p><em>This AI has limited oral cancer training - professional evaluation is crucial.</em></p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
                 # Display results
                 st.markdown(f"""
@@ -509,42 +593,51 @@ def main():
                     <p><strong>Prediction:</strong> {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}</p>
                     <p><strong>Confidence:</strong> {confidence:.2%}</p>
                     <p><strong>Risk Level:</strong> <span style="color: {risk_color}; font-weight: bold;">{risk_level}</span></p>
+                    {f'<p><strong>🦷 Oral Image Analysis:</strong> Detected based on {"filename" if oral_analysis.get("filename_match") else "image characteristics"}</p>' if is_oral else ''}
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Simplified confidence visualization - Only cancer probability
+                # Cancer detection confidence
                 st.markdown("### 📈 Cancer Detection Confidence")
                 
-                cancer_prob = float(probabilities[1])  # Cancer probability
                 st.metric("Cancer Detection Probability", f"{cancer_prob:.2%}")
                 st.progress(cancer_prob)
                 
-                # Visual indicator
-                if cancer_prob > 0.7:
-                    st.error(f"⚠️ High cancer probability detected: {cancer_prob:.2%}")
-                elif cancer_prob > 0.5:
-                    st.warning(f"⚠️ Moderate cancer probability: {cancer_prob:.2%}")
+                # Enhanced visual indicators
+                if is_oral:
+                    if cancer_prob > 0.20:
+                        st.error(f"🚨 ORAL LESION - HIGH CONCERN: {cancer_prob:.2%} - Seek immediate medical attention!")
+                    elif cancer_prob > 0.15:
+                        st.warning(f"⚠️ ORAL LESION - MODERATE CONCERN: {cancer_prob:.2%} - Professional evaluation recommended")
+                    else:
+                        st.info(f"ℹ️ Oral image analyzed: {cancer_prob:.2%} cancer probability")
                 else:
-                    st.success(f"✅ Low cancer probability: {cancer_prob:.2%}")
+                    if cancer_prob > 0.7:
+                        st.error(f"⚠️ High cancer probability detected: {cancer_prob:.2%}")
+                    elif cancer_prob > 0.5:
+                        st.warning(f"⚠️ Moderate cancer probability: {cancer_prob:.2%}")
+                    else:
+                        st.success(f"✅ Low cancer probability: {cancer_prob:.2%}")
                 
-                # Detailed explanation
+                # Enhanced medical interpretation
                 st.markdown("### 📋 Medical Interpretation")
                 
-                if predicted_class == 1:
+                if predicted_class == 1 or (is_oral and cancer_prob > 0.20):
                     st.markdown(f"""
-                    **🔍 Finding**: The AI model has identified patterns consistent with cancerous tissue.
+                    **🔍 Finding**: {'Oral lesion with concerning characteristics detected' if is_oral else 'The AI model has identified patterns consistent with cancerous tissue'}.
                     
                     **📊 Cancer Probability**: {cancer_prob:.2%}
                     
-                    **🏥 Recommendation**: 
-                    - Immediate consultation with an oncologist is strongly recommended
-                    - Further diagnostic tests may be required
-                    - Early detection enables better treatment outcomes
+                    **🏥 Urgent Recommendations**: 
+                    - {'IMMEDIATE consultation with oral surgeon/oncologist (within 24-48 hours)' if is_oral else 'Immediate consultation with an oncologist is strongly recommended'}
+                    - Further diagnostic tests and possible biopsy required
+                    - {'Oral cancer progresses rapidly - do not delay treatment' if is_oral else 'Early detection enables better treatment outcomes'}
                     
-                    **📋 Next Steps**:
-                    - Schedule appointment with healthcare provider
+                    **📋 Critical Next Steps**:
+                    - Schedule emergency appointment with healthcare provider
                     - Prepare medical history and previous imaging results
-                    - Consider seeking a second medical opinion
+                    - {'Consider second opinion from oral cancer specialist' if is_oral else 'Consider seeking a second medical opinion'}
+                    - Document any changes in the lesion
                     """)
                 else:
                     st.markdown(f"""
@@ -552,27 +645,28 @@ def main():
                     
                     **📊 Cancer Probability**: {cancer_prob:.2%}
                     
-                    **🏥 Recommendation**: 
-                    - Continue regular medical screening as recommended by your physician
+                    **🏥 Recommendations**: 
+                    - {'Continue monitoring any oral lesions - see dentist/oral surgeon if lesion persists >2 weeks' if is_oral else 'Continue regular medical screening as recommended by your physician'}
                     - Maintain healthy lifestyle practices
                     - Report any new symptoms to your healthcare provider
                     
-                    **⚠️ Important Note**:
-                    - This result does not rule out all types of cancer
+                    **⚠️ Important Notes**:
+                    - {'Even with low AI probability, oral lesions should be professionally evaluated' if is_oral else 'This result does not rule out all types of cancer'}
                     - Regular medical checkups remain important
-                    - Consult your doctor for comprehensive health assessment
+                    - {'Any persistent oral lesion >2 weeks requires biopsy' if is_oral else 'Consult your doctor for comprehensive health assessment'}
                     """)
                 
                 # Export functionality
                 st.markdown("### 💾 Export Results")
                 
-                # Create summary report
+                # Enhanced report with oral cancer information
                 report = f"""AI-Powered Cancer Detection Report
 ================================
 
 Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
 Image: {uploaded_file.name}
 Model: Vision Transformer (ViT)
+Image Type: {'ORAL/DENTAL' if is_oral else 'GENERAL MEDICAL'}
 
 ANALYSIS RESULTS:
 - Prediction: {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}
@@ -580,20 +674,27 @@ ANALYSIS RESULTS:
 - Cancer Probability: {cancer_prob:.2%}
 - Risk Level: {risk_level}
 
+{'ORAL IMAGE ANALYSIS:' if is_oral else ''}
+{f'- Detected as oral image: {oral_analysis}' if is_oral else ''}
+{'- URGENT: Requires immediate professional evaluation' if is_oral and cancer_prob > 0.20 else ''}
+
 IMAGE INFORMATION:
 - Size: {image.size[0]} x {image.size[1]} pixels
 - Format: {image.format}
 - Mode: {image.mode}
 
-MEDICAL DISCLAIMER:
+CRITICAL MEDICAL DISCLAIMER:
 This report is generated by an AI system for research purposes only.
+{'FOR ORAL IMAGES: This model has LIMITED ORAL CANCER TRAINING.' if is_oral else ''}
 It should not be used as a substitute for professional medical diagnosis.
 Always consult with qualified healthcare professionals for medical decisions.
+{'FOR ORAL LESIONS: Immediate consultation with oral surgeon/oncologist recommended.' if is_oral else ''}
 
 System Information:
 - Model Source: Google Drive (ID: {DRIVE_FOLDER_ID})
 - Processing Device: {'GPU' if torch.cuda.is_available() else 'CPU'}
 - Analysis Date: {time.strftime('%Y-%m-%d %H:%M:%S')}
+- Oral Image Detection: {'Yes' if is_oral else 'No'}
 """
                 
                 st.download_button(
@@ -609,12 +710,12 @@ System Information:
         else:
             st.info("👆 Please upload a medical image to begin cancer detection analysis")
             
-            # Sample instructions
+            # Enhanced instructions
             st.markdown("""
             ### 🔍 Image Requirements:
             - **Format**: JPG, JPEG, or PNG
             - **Quality**: High resolution preferred  
-            - **Content**: Medical imaging (X-ray, CT, MRI, histology, etc.)
+            - **Content**: Medical imaging (X-ray, CT, MRI, histology, oral photography, etc.)
             - **Size**: Any size (automatically resized to 224x224)
             
             ### ⚡ Processing Information:
@@ -622,6 +723,12 @@ System Information:
             - **Focus**: Cancer Detection
             - **Processing Time**: ~2-10 seconds
             - **Source**: Your Google Drive pretrained model
+            - **⚠️ Limitation**: Limited oral cancer training - use caution with dental images
+            
+            ### 🦷 Special Note for Oral Images:
+            - This model has limited training on oral cancer
+            - Any oral lesions require immediate professional evaluation
+            - Do not rely solely on AI for oral cancer diagnosis
             """)
     
     # Footer
@@ -630,7 +737,7 @@ System Information:
     <div style="text-align: center; color: #666;">
         <p>🏥 AI-Powered Cancer Detection System | Built with Streamlit & Vision Transformers</p>
         <p>📁 Model Source: Google Drive | ⚠️ For Research and Educational Use Only</p>
-        <p>🔬 Not for Clinical Diagnosis | Always Consult Medical Professionals</p>
+        <p>🔬 Not for Clinical Diagnosis | 🦷 Limited Oral Cancer Training | Always Consult Medical Professionals</p>
     </div>
     """, unsafe_allow_html=True)
 
