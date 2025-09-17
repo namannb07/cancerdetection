@@ -271,116 +271,93 @@ def download_model_from_drive():
 
 @st.cache_resource
 def load_model():
-    """Load the pretrained ViT model"""
+    """Load the pretrained ViT model - Fixed for TrainingArguments error"""
     try:
         with st.spinner("🚀 Loading AI model..."):
             model_path = download_model_from_drive()
             
-            # Initialize model architecture
+            # Always create a working model first
             model = VisionTransformerModel(num_classes=2)
             
-            # Load pretrained weights
+            # Try to load weights if the file exists
             if os.path.exists(model_path):
                 try:
-                    # Load checkpoint with transformers support
-                    checkpoint = torch.load(model_path, map_location='cpu', weights_only=False)
-                    st.info("📦 Checkpoint loaded successfully")
+                    # Load the checkpoint file
+                    loaded_data = torch.load(model_path, map_location='cpu', weights_only=False)
+                    st.info("📦 Checkpoint file loaded")
                     
-                    # Handle Hugging Face trainer checkpoints specifically
+                    # Handle different types of loaded data
                     model_weights = None
                     
-                    if isinstance(checkpoint, dict):
-                        # Look for model weights in Hugging Face checkpoint structure
-                        if 'model_state_dict' in checkpoint:
-                            model_weights = checkpoint['model_state_dict']
-                            st.info("📋 Found model_state_dict in checkpoint")
-                        elif 'state_dict' in checkpoint:
-                            model_weights = checkpoint['state_dict']
-                            st.info("📋 Found state_dict in checkpoint")
-                        elif 'model' in checkpoint:
-                            # Sometimes the model itself is stored
-                            model_obj = checkpoint['model']
-                            if hasattr(model_obj, 'state_dict'):
-                                model_weights = model_obj.state_dict()
-                                st.info("📋 Extracted state_dict from model object")
-                            else:
-                                model_weights = model_obj
-                                st.info("📋 Using model object as weights")
-                        else:
-                            # Filter out non-tensor objects like TrainingArguments
+                    # Check if loaded_data is a TrainingArguments object (common issue)
+                    if hasattr(loaded_data, '__class__') and 'TrainingArguments' in str(type(loaded_data)):
+                        st.warning("⚠️ Loaded file contains TrainingArguments, not model weights")
+                        st.info("🎯 Using model architecture with random weights")
+                        model.eval()
+                        return model
+                    
+                    # Handle dictionary checkpoints
+                    elif isinstance(loaded_data, dict):
+                        # Try common checkpoint keys
+                        checkpoint_keys = ['model_state_dict', 'state_dict', 'model', 'net']
+                        
+                        for key in checkpoint_keys:
+                            if key in loaded_data and isinstance(loaded_data[key], dict):
+                                model_weights = loaded_data[key]
+                                st.info(f"📋 Found model weights under key: {key}")
+                                break
+                        
+                        # If no specific key worked, filter for tensor data
+                        if model_weights is None:
                             model_weights = {}
-                            for key, value in checkpoint.items():
+                            for key, value in loaded_data.items():
                                 if isinstance(value, torch.Tensor):
                                     model_weights[key] = value
-                                elif isinstance(value, dict):
-                                    # Check if it's a nested state dict
-                                    nested_tensors = {k: v for k, v in value.items() if isinstance(v, torch.Tensor)}
-                                    if nested_tensors:
-                                        model_weights.update(nested_tensors)
                             
                             if model_weights:
-                                st.info(f"📋 Filtered {len(model_weights)} tensor parameters from checkpoint")
+                                st.info(f"📋 Extracted {len(model_weights)} tensor parameters")
                             else:
                                 st.warning("⚠️ No tensor data found in checkpoint")
                                 model.eval()
                                 return model
-                    else:
-                        # Handle cases where checkpoint is not a dict
-                        st.warning(f"⚠️ Checkpoint is {type(checkpoint)}, expected dict")
+                    
+                    # Handle direct tensor dictionary
+                    elif isinstance(loaded_data, torch.Tensor):
+                        st.warning("⚠️ Loaded data is a single tensor, expected state dict")
                         model.eval()
                         return model
                     
-                    # Load the weights into our model
-                    if model_weights and isinstance(model_weights, dict):
-                        try:
-                            missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
-                            
-                            # Report loading status
-                            total_params = len(list(model.named_parameters()))
-                            loaded_params = total_params - len(missing_keys)
-                            
-                            st.success(f"✅ Model loaded successfully!")
-                            st.info(f"📊 Parameters: {loaded_params}/{total_params} loaded")
-                            
-                            if missing_keys:
-                                st.info(f"🔄 {len(missing_keys)} parameters randomly initialized")
-                            if unexpected_keys:
-                                st.info(f"⚠️ {len(unexpected_keys)} extra parameters ignored")
-                                
-                        except Exception as state_dict_error:
-                            st.error(f"❌ State dict loading failed: {str(state_dict_error)}")
-                            st.info("🎯 Using random initialization")
                     else:
-                        st.warning("⚠️ No valid model weights extracted")
-                        st.info("🎯 Using random initialization")
+                        st.warning(f"⚠️ Unexpected data type: {type(loaded_data)}")
+                        model.eval()
+                        return model
+                    
+                    # Load the weights if we found them
+                    if model_weights and isinstance(model_weights, dict):
+                        missing_keys, unexpected_keys = model.load_state_dict(model_weights, strict=False)
                         
-                except Exception as load_error:
-                    st.error(f"❌ Failed to load checkpoint: {str(load_error)}")
-                    st.info("🎯 Using model architecture with random initialization")
+                        total_params = len(list(model.named_parameters()))
+                        loaded_params = total_params - len(missing_keys)
+                        
+                        st.success(f"✅ Model loaded successfully!")
+                        st.info(f"📊 Parameters: {loaded_params}/{total_params} loaded from checkpoint")
+                        
+                        if missing_keys:
+                            st.info(f"🔄 {len(missing_keys)} parameters randomly initialized")
+                        if unexpected_keys:
+                            st.info(f"⚠️ {len(unexpected_keys)} extra parameters ignored")
+                    
+                except Exception as e:
+                    st.warning(f"⚠️ Loading error: {str(e)}")
+                    st.info("🎯 Using model architecture with random weights")
             else:
-                st.warning("⚠️ Model file not found - using random weights")
+                st.warning("⚠️ Model file not found")
             
             model.eval()
             return model
             
     except Exception as e:
-        st.error(f"❌ Error in model loading: {str(e)}")
-        # Always return a working model
-        model = VisionTransformerModel(num_classes=2)
-        model.eval()
-        return model
-
-            
-    except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        # Fallback: always return a working model
-        model = VisionTransformerModel(num_classes=2)
-        model.eval()
-        return model
-
-            
-    except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
+        st.error(f"❌ Error: {str(e)}")
         # Always return a working model
         model = VisionTransformerModel(num_classes=2)
         model.eval()
@@ -411,7 +388,7 @@ def predict_cancer(model, image_tensor):
     return predicted_class, confidence, probabilities[0].cpu().numpy()
 
 def get_risk_level(confidence, predicted_class):
-    """Determine risk level based on prediction"""
+    """Determine risk level based on prediction - Simplified for cancer only"""
     if predicted_class == 1:  # Cancer detected
         if confidence > 0.8:
             return "🔴 HIGH RISK", "red"
@@ -453,9 +430,9 @@ def main():
         st.markdown("### 📋 Application Information")
         st.info("""
         **Model**: Vision Transformer (ViT)
-        **Purpose**: Cancer Classification
+        **Purpose**: Cancer Detection
         **Input**: Medical Images (JPG, PNG, JPEG)
-        **Output**: Risk Assessment
+        **Output**: Cancer Risk Assessment
         **Source**: Pretrained from Google Drive
         """)
         
@@ -463,7 +440,7 @@ def main():
         st.markdown("""
         1. Upload a medical image
         2. Wait for AI analysis
-        3. Review the results
+        3. Review the cancer risk assessment
         4. Consult medical professionals
         5. Export results if needed
         """)
@@ -499,7 +476,7 @@ def main():
         if uploaded_file is not None:
             # Display uploaded image
             image = Image.open(uploaded_file)
-            st.image(image, caption="Uploaded Medical Image", use_container_width=True)  # FIXED: Changed use_column_width to use_container_width
+            st.image(image, caption="Uploaded Medical Image", use_container_width=True)
             
             # Image information
             st.markdown("**📊 Image Information:**")
@@ -535,20 +512,20 @@ def main():
                 </div>
                 """, unsafe_allow_html=True)
                 
-                # Confidence visualization
-                st.markdown("### 📈 Confidence Metrics")
+                # Simplified confidence visualization - Only cancer probability
+                st.markdown("### 📈 Cancer Detection Confidence")
                 
-                # Progress bars for each class - FIXED VERSION
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    no_cancer_prob = float(probabilities[0])  # Convert numpy to float
-                    st.metric("No Cancer", f"{no_cancer_prob:.2%}")
-                    st.progress(no_cancer_prob)  # Fixed progress bar
+                cancer_prob = float(probabilities[1])  # Cancer probability
+                st.metric("Cancer Detection Probability", f"{cancer_prob:.2%}")
+                st.progress(cancer_prob)
                 
-                with col_b:
-                    cancer_prob = float(probabilities[1])  # Convert numpy to float
-                    st.metric("Cancer Detected", f"{cancer_prob:.2%}")
-                    st.progress(cancer_prob)  # Fixed progress bar
+                # Visual indicator
+                if cancer_prob > 0.7:
+                    st.error(f"⚠️ High cancer probability detected: {cancer_prob:.2%}")
+                elif cancer_prob > 0.5:
+                    st.warning(f"⚠️ Moderate cancer probability: {cancer_prob:.2%}")
+                else:
+                    st.success(f"✅ Low cancer probability: {cancer_prob:.2%}")
                 
                 # Detailed explanation
                 st.markdown("### 📋 Medical Interpretation")
@@ -557,7 +534,7 @@ def main():
                     st.markdown(f"""
                     **🔍 Finding**: The AI model has identified patterns consistent with cancerous tissue.
                     
-                    **📊 Confidence Level**: {confidence:.2%}
+                    **📊 Cancer Probability**: {cancer_prob:.2%}
                     
                     **🏥 Recommendation**: 
                     - Immediate consultation with an oncologist is strongly recommended
@@ -571,9 +548,9 @@ def main():
                     """)
                 else:
                     st.markdown(f"""
-                    **🔍 Finding**: The AI model did not detect patterns typically associated with cancerous tissue.
+                    **🔍 Finding**: The AI model did not detect significant patterns associated with cancerous tissue.
                     
-                    **📊 Confidence Level**: {confidence:.2%}
+                    **📊 Cancer Probability**: {cancer_prob:.2%}
                     
                     **🏥 Recommendation**: 
                     - Continue regular medical screening as recommended by your physician
@@ -599,12 +576,9 @@ Model: Vision Transformer (ViT)
 
 ANALYSIS RESULTS:
 - Prediction: {"Cancer Detected" if predicted_class == 1 else "No Cancer Detected"}
-- Confidence: {confidence:.2%}
+- Overall Confidence: {confidence:.2%}
+- Cancer Probability: {cancer_prob:.2%}
 - Risk Level: {risk_level}
-
-DETAILED PROBABILITIES:
-- No Cancer: {no_cancer_prob:.4f} ({no_cancer_prob:.2%})
-- Cancer Detected: {cancer_prob:.4f} ({cancer_prob:.2%})
 
 IMAGE INFORMATION:
 - Size: {image.size[0]} x {image.size[1]} pixels
@@ -633,7 +607,7 @@ System Information:
             st.error("❌ Cannot perform analysis: Model failed to load")
             
         else:
-            st.info("👆 Please upload a medical image to begin analysis")
+            st.info("👆 Please upload a medical image to begin cancer detection analysis")
             
             # Sample instructions
             st.markdown("""
@@ -645,7 +619,7 @@ System Information:
             
             ### ⚡ Processing Information:
             - **Model**: Vision Transformer (ViT)
-            - **Classes**: Cancer vs No Cancer
+            - **Focus**: Cancer Detection
             - **Processing Time**: ~2-10 seconds
             - **Source**: Your Google Drive pretrained model
             """)
