@@ -5,3 +5,8 @@ Pillow
 numpy
 gdown>=5.0.0
 requests
+transformers>=4.21.0
+accelerate>=0.20.0
+safetensors>=0.3.0
+huggingface-hub>=0.15.0
+tokenizers>=0.13.0
